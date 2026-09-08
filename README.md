@@ -6,8 +6,8 @@ Teams opt in per repo, configure what Bob checks for via a config file, and get 
 
 ## Docs
 
-- [PRD](./PRD.md) — problem statement, goals, scope, success metrics
-- [Tech Design](./TECH_DESIGN.md) — architecture, components, data model
+- [PRD](./docs/PRD.md) — problem statement, goals, scope, success metrics
+- [Tech Design](./docs/TECH_DESIGN.md) — architecture, components, data model
 
 ## Status
 
