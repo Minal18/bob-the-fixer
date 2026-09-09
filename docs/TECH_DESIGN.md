@@ -17,8 +17,8 @@ flowchart TD
     D --> G["LLM API (Claude)"]
     D --> H[("Posted Comments Table")]
 
-    I["Airflow DAG<br/>(scheduled)"] --> J["Feedback Poll Task"]
-    J --> H
+    I["EventBridge Scheduler<br/>(fixed interval)"] --> J["Feedback Poll Lambda"]
+    J -- "read: which comments to check" --> H
     J --> K["GitHub Reactions API"]
     J --> L[("Feedback Metrics Table")]
 ```
@@ -44,7 +44,7 @@ Two independent GitHub webhook event types feed the same pipeline — one doesn'
 | **Worker Lambda** | Exchanges JWT → installation token; branches on event type: PR review, or `enable`/`disable`/`status` command. For reviews, maps LLM findings to diff positions (file + hunk offset) before posting inline comments |
 | **Enablement Store** | Per-repo on/off flag, since repos are installed broadly but reviewed only when explicitly enabled |
 | **Posted Comments Table** | Records every comment Bob posts, so feedback can be polled later |
-| **Feedback Poll Task (Airflow)** | Scheduled DAG task; checks reaction counts on Bob's own recent comments |
+| **Feedback Poll Lambda** | Invoked on a fixed interval by EventBridge Scheduler; reads recent rows from Posted Comments, checks reaction counts on each via the GitHub Reactions API |
 | **Feedback Metrics Table** | Stores 👍/👎 counts per comment, the core quality signal |
 
 ## Data Model
@@ -116,6 +116,7 @@ Issued as PR/issue comments; require `write` access on the target repo (checked 
 
 - The `enable`/`disable` write is a simple, fast operation (unlike the LLM review call) — the Receiver could handle it synchronously and skip SQS entirely, avoiding queue latency for something users expect to feel instant. Only `pull_request` events strictly need the queue, since only that path has a slow LLM call to buffer against.
 - Inline comments require mapping LLM findings (file + line) to GitHub's diff "position" (offset within the unified diff hunk, not the absolute file line) — GitHub's Review API rejects positions outside the diff's visible hunks. A finding on such a line is dropped rather than surfaced elsewhere; prompt design should constrain the LLM to only flag lines actually present in the diff, validated during testing against real PR shapes.
+- GitHub has no webhook event for reactions being added/removed on a comment (only `created`/`edited`/`deleted` on the comment itself) — this is a known gap, tracked in an open GitHub feature request. Polling the Reactions API is the only option today; both the Posted Comments table (what to check) and Feedback Metrics table (poll results) stay in the design because of this — only the trigger (EventBridge Scheduler instead of Airflow) changed.
 - Feedback poll window (e.g. only recheck comments < 14 days old) — avoid wasted API calls on stale comments.
 - Aggregate views (acted-upon rate, per-repo adoption) can be computed on top of the tables above rather than stored separately.
 - Config file validation should fail safe (skip review, log) rather than fail loud.
