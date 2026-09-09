@@ -61,17 +61,16 @@ Two independent GitHub webhook event types feed the same pipeline — one doesn'
 
 ### Posted Comments Table
 
-Bob posts one review per PR containing multiple inline comments — each line-level comment gets its own row, grouped by `review_id`.
+Bob posts one review per PR containing multiple inline comments — each line-level comment gets its own row.
 
 | Field | Type | Notes |
 |---|---|---|
 | `comment_id` | string (PK) | GitHub comment ID, returned on post |
-| `review_id` | string | Groups all inline comments from one review call |
-| `repo_id` | string | |
-| `pr_number` | int | |
-| `file_path` | string | File the comment is anchored to |
-| `line` | int | Line number the comment is anchored to |
-| `posted_at` | timestamp | |
+| `repo_id` | string | Needed to call the Reactions API (`owner/repo` + `comment_id`) |
+| `pr_number` | int | Needed to re-fetch the PR's current diff for the acted-upon-rate metric |
+| `file_path` | string | File the comment is anchored to — needed for acted-upon-rate |
+| `line` | int | Line number the comment is anchored to — needed for acted-upon-rate |
+| `posted_at` | timestamp | Drives the poll window (e.g. skip comments older than 14 days) |
 | `last_checked_at` | timestamp, nullable | Set by the feedback poll job |
 
 ### Feedback Metrics Table
@@ -79,11 +78,11 @@ Bob posts one review per PR containing multiple inline comments — each line-le
 | Field | Type | Notes |
 |---|---|---|
 | `comment_id` | string (PK) | Joins to Posted Comments |
-| `repo_id` | string | |
-| `pr_number` | int | |
 | `thumbs_up` | int | Snapshot count, not a delta |
 | `thumbs_down` | int | Snapshot count, not a delta |
 | `checked_at` | timestamp | Last time this row was refreshed |
+
+`repo_id`/`pr_number` aren't duplicated here — they're only needed to make the Reactions API call, which happens from Posted Comments; any per-repo or per-PR rollup joins back on `comment_id` rather than storing them twice.
 
 Reactions API returns a current total each call — polling overwrites `thumbs_up`/`thumbs_down`, no incremental math needed.
 
