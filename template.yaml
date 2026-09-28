@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Bob the Fixer — AI-powered GitHub PR reviewer.
+  Webhook Receiver -> SQS -> Worker Lambda, DynamoDB enablement/comments/feedback
+  stores, and an EventBridge-scheduled feedback poll.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 30
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        POWERTOOLS_LOG_LEVEL: INFO
+
+Resources:
+
+  # ---------- Secrets ----------
+  # Values are placeholders at deploy time; populate real values afterwards with:
+  #   aws secretsmanager put-secret-value --secret-id <name> --secret-string <value>
+
+  GitHubAppPrivateKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub bob-the-fixer/${Stage}/github-app-private-key
+      Description: GitHub App private key (PEM) used to mint installation tokens
+
+  GitHubWebhookSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub bob-the-fixer/${Stage}/github-webhook-secret
+      Description: Shared secret used to verify GitHub webhook signatures
+      GenerateSecretString:
+        ExcludePunctuation: true
+        PasswordLength: 40
+
+  AnthropicApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub bob-the-fixer/${Stage}/anthropic-api-key
+      Description: Claude API key used by the Worker Lambda to generate review findings
+
+  # ---------- Shared code ----------
+
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub bob-the-fixer-${Stage}-common
+      ContentUri: src/common_layer/
+      CompatibleRuntimes: [python3.12]
+    Metadata:
+      BuildMethod: python3.12
+
+  # ---------- Data layer ----------
+
+  EnablementTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub bob-the-fixer-${Stage}-enablement
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: repo_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: repo_id
+          KeyType: HASH
+
+  PostedCommentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub bob-the-fixer-${Stage}-posted-comments
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: comment_id
+          AttributeType: S
+        - AttributeName: posted_date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: comment_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: PostedDateIndex
+          KeySchema:
+            - AttributeName: posted_date
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  FeedbackMetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub bob-the-fixer-${Stage}-feedback-metrics
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: comment_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: comment_id
+          KeyType: HASH
+
+  # ---------- Ingest path ----------
+
+  WorkerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub bob-the-fixer-${Stage}-worker-dlq
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  WorkerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub bob-the-fixer-${Stage}-worker-queue
+      VisibilityTimeout: 360 # 6x Worker Lambda timeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WorkerDLQ.Arn
+        maxReceiveCount: 3
+
+  ReceiverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub bob-the-fixer-${Stage}-receiver
+      CodeUri: src/receiver/
+      Handler: app.lambda_handler
+      Timeout: 10
+      Layers: [!Ref CommonLayer]
+      FunctionUrlConfig:
+        AuthType: NONE
+      Environment:
+        Variables:
+          WORKER_QUEUE_URL: !Ref WorkerQueue
+          GITHUB_WEBHOOK_SECRET_ARN: !Ref GitHubWebhookSecret
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt WorkerQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref GitHubWebhookSecret
+
+  # ---------- Worker ----------
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub bob-the-fixer-${Stage}-worker
+      CodeUri: src/worker/
+      Handler: app.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Layers: [!Ref CommonLayer]
+      Environment:
+        Variables:
+          ENABLEMENT_TABLE: !Ref EnablementTable
+          POSTED_COMMENTS_TABLE: !Ref PostedCommentsTable
+          GITHUB_APP_PRIVATE_KEY_SECRET_ARN: !Ref GitHubAppPrivateKeySecret
+          ANTHROPIC_API_KEY_SECRET_ARN: !Ref AnthropicApiKeySecret
+      Events:
+        WorkerQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WorkerQueue.Arn
+            BatchSize: 1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EnablementTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PostedCommentsTable
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref GitHubAppPrivateKeySecret
+                - !Ref AnthropicApiKeySecret
+
+  # ---------- Feedback poll ----------
+
+  FeedbackPollFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub bob-the-fixer-${Stage}-feedback-poll
+      CodeUri: src/feedback_poll/
+      Handler: app.lambda_handler
+      Timeout: 60
+      Layers: [!Ref CommonLayer]
+      Environment:
+        Variables:
+          POSTED_COMMENTS_TABLE: !Ref PostedCommentsTable
+          FEEDBACK_METRICS_TABLE: !Ref FeedbackMetricsTable
+          GITHUB_APP_PRIVATE_KEY_SECRET_ARN: !Ref GitHubAppPrivateKeySecret
+          POLL_WINDOW_DAYS: '3'
+      Events:
+        ScheduledPoll:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Enabled: true
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PostedCommentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FeedbackMetricsTable
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref GitHubAppPrivateKeySecret
+
+Outputs:
+  ReceiverFunctionUrl:
+    Description: Set this as the GitHub App's webhook URL
+    Value: !GetAtt ReceiverFunction.FunctionUrl
+  WorkerQueueUrl:
+    Value: !Ref WorkerQueue
+  EnablementTableName:
+    Value: !Ref EnablementTable
+  PostedCommentsTableName:
+    Value: !Ref PostedCommentsTable
+  FeedbackMetricsTableName:
+    Value: !Ref FeedbackMetricsTable
+  GitHubAppPrivateKeySecretArn:
+    Value: !Ref GitHubAppPrivateKeySecret
+  GitHubWebhookSecretArn:
+    Value: !Ref GitHubWebhookSecret
+  AnthropicApiKeySecretArn:
+    Value: !Ref AnthropicApiKeySecret
