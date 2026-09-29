@@ -220,7 +220,7 @@ Resources:
 Outputs:
   ReceiverFunctionUrl:
     Description: Set this as the GitHub App's webhook URL
-    Value: !GetAtt ReceiverFunction.FunctionUrl
+    Value: !GetAtt ReceiverFunctionUrl.FunctionUrl
   WorkerQueueUrl:
     Value: !Ref WorkerQueue
   EnablementTableName:
