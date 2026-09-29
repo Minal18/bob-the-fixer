@@ -10,6 +10,9 @@ Parameters:
     Type: String
     Default: dev
     AllowedValues: [dev, prod]
+  GitHubAppId:
+    Type: String
+    Description: GitHub App ID (not sensitive, unlike the private key) used to sign installation-token JWTs
 
 Globals:
   Function:
@@ -123,7 +126,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub bob-the-fixer-${Stage}-worker-queue
-      VisibilityTimeout: 360 # 6x Worker Lambda timeout
+      VisibilityTimeout: 540 # 6x Worker Lambda timeout
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt WorkerDLQ.Arn
         maxReceiveCount: 3
@@ -158,13 +161,14 @@ Resources:
       FunctionName: !Sub bob-the-fixer-${Stage}-worker
       CodeUri: src/worker/
       Handler: app.lambda_handler
-      Timeout: 60
+      Timeout: 90
       MemorySize: 512
       Layers: [!Ref CommonLayer]
       Environment:
         Variables:
           ENABLEMENT_TABLE: !Ref EnablementTable
           POSTED_COMMENTS_TABLE: !Ref PostedCommentsTable
+          GITHUB_APP_ID: !Ref GitHubAppId
           GITHUB_APP_PRIVATE_KEY_SECRET_ARN: !Ref GitHubAppPrivateKeySecret
           ANTHROPIC_API_KEY_SECRET_ARN: !Ref AnthropicApiKeySecret
       Events:
