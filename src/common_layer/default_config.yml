@@ -1,0 +1,7 @@
+# Baseline review config, applied to any repo that hasn't added its own .bob-the-fixer.yml.
+review_focus:
+  - bugs
+  - security
+ignore_paths: []
+custom_instructions: ""
+severity_threshold: warning

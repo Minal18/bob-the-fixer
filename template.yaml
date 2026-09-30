@@ -60,8 +60,10 @@ Resources:
       LayerName: !Sub bob-the-fixer-${Stage}-common
       ContentUri: src/common_layer/
       CompatibleRuntimes: [python3.12]
+      CompatibleArchitectures: [arm64]
     Metadata:
       BuildMethod: python3.12
+      BuildArchitecture: arm64
 
   # ---------- Data layer ----------
 

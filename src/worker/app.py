@@ -14,7 +14,7 @@ from github_api import get_collaborator_permission, get_pr_diff, get_repo_file, 
 from github_auth import get_installation_token
 from repo_config import CONFIG_PATH, load_config
 from reviewer import review_diff
-from secrets import get_secret
+from aws_secrets import get_secret
 
 dynamodb = boto3.resource("dynamodb")
 enablement_table = dynamodb.Table(os.environ["ENABLEMENT_TABLE"])

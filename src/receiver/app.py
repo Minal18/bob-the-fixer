@@ -5,7 +5,7 @@ import json
 import os
 
 import boto3
-from secrets import get_secret  # provided by the CommonLayer
+from aws_secrets import get_secret  # provided by the CommonLayer
 
 sqs = boto3.client("sqs")
 
