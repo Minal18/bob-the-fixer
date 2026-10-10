@@ -100,12 +100,15 @@ def handle_pull_request(payload: dict) -> None:
     print(f"handle_pull_request: posted_review_id={review['id']} posted_comments_count={len(posted_comments)}")
     posted_at = datetime.now(timezone.utc)
     for review_comment in posted_comments:
+        line = review_comment.get("line") or review_comment.get("original_line")
+        if line is None:
+            print(f"handle_pull_request: WARNING - comment {review_comment.get('id')} has no line from GitHub: {review_comment}")
         posted_comments_table.put_item(Item={
             "comment_id": str(review_comment["id"]),
             "repo_id": repo_id,
             "pr_number": pr_number,
             "file_path": review_comment["path"],
-            "line": review_comment.get("line") or review_comment.get("original_line"),
+            "line": line,
             "posted_at": posted_at.isoformat(),
             "posted_date": posted_at.date().isoformat(),
         })
