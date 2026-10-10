@@ -16,7 +16,17 @@ FINDINGS_TOOL = {
                     "properties": {
                         "file": {"type": "string", "description": "Exact path as shown after '+++ b/' in the diff"},
                         "line": {"type": "integer", "description": "New-file line number, as it appears in the diff"},
-                        "severity": {"type": "string", "enum": ["info", "warning", "error"]},
+                        "severity": {
+                            "type": "string",
+                            "enum": ["info", "warning", "error"],
+                            "description": (
+                                "error: will cause incorrect behavior, a crash, data loss, or is an "
+                                "exploitable security issue - should block merge. warning: a real "
+                                "problem that should be fixed before merge but isn't immediately "
+                                "dangerous (e.g. an unhandled edge case, inconsistent error handling). "
+                                "info: minor, stylistic, or a nice-to-have - not a functional risk."
+                            ),
+                        },
                         "comment": {"type": "string"},
                     },
                     "required": ["file", "line", "severity", "comment"],
@@ -40,6 +50,14 @@ def review_diff(api_key: str, diff_text: str, config: dict) -> list[dict]:
 Only flag lines that literally appear in the diff below (added '+' lines or unchanged
 context lines) — never a line from outside this diff. Use the exact file path as shown
 after "+++ b/" and the line number as it appears in the new version of the file.
+
+Severity rubric — classify each finding by its actual impact, not by how it feels:
+- error: will cause incorrect behavior, a crash, data loss, or is an exploitable security
+  issue. Should block merge.
+- warning: a real problem that should be fixed before merge, but isn't immediately
+  dangerous — e.g. an unhandled edge case, inconsistent error handling, a bug that only
+  triggers on a specific input.
+- info: minor, stylistic, or a nice-to-have improvement. Not a functional risk.
 
 <diff>
 {diff_text}
