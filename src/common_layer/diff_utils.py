@@ -17,6 +17,13 @@ def commentable_lines(diff_text: str) -> dict[str, set[int]]:
     new_line = None
 
     for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            # Start of the next file's header block ("diff --git", "index ...", "---").
+            # Without this, those lines fall through to the trailing `else` below and
+            # get miscounted as a trailing context line of the *previous* file.
+            current_file = None
+            new_line = None
+            continue
         if line.startswith("+++ b/"):
             current_file = line[len("+++ b/"):]
             result.setdefault(current_file, set())
