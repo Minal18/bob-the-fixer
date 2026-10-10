@@ -1,0 +1,5 @@
+pytest
+moto[dynamodb]
+responses
+cryptography
+PyJWT[crypto]
