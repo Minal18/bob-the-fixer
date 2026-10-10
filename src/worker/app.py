@@ -10,7 +10,14 @@ from datetime import datetime, timezone
 
 import boto3
 from diff_utils import commentable_lines, filter_diff_by_ignore_paths
-from github_api import get_collaborator_permission, get_pr_diff, get_repo_file, post_issue_comment, post_review
+from github_api import (
+    get_collaborator_permission,
+    get_pr_diff,
+    get_repo_file,
+    get_review_comments,
+    post_issue_comment,
+    post_review,
+)
 from github_auth import get_installation_token
 from repo_config import CONFIG_PATH, load_config
 from reviewer import review_diff
@@ -53,33 +60,46 @@ def handle_pull_request(payload: dict) -> None:
     # Config is read from the default branch, not the PR head — a PR can't loosen its own review policy.
     raw_config = get_repo_file(token, owner, repo, CONFIG_PATH, default_branch)
     config = load_config(raw_config)
+    print(f"handle_pull_request: raw_config_present={raw_config is not None} config={config}")
     if config is None:
+        print("handle_pull_request: malformed config, skipping")
         return  # malformed config: fail safe, skip review rather than fail loud
 
     diff = get_pr_diff(token, owner, repo, pr_number)
     diff = filter_diff_by_ignore_paths(diff, config["ignore_paths"])
+    print(f"handle_pull_request: diff_len={len(diff)}")
     if not diff.strip():
+        print("handle_pull_request: diff empty after filtering, skipping")
         return
 
     valid_lines = commentable_lines(diff)
+    print(f"handle_pull_request: valid_lines={ {k: sorted(v) for k, v in valid_lines.items()} }")
     findings = review_diff(get_secret(ANTHROPIC_API_KEY_SECRET_ARN), diff, config)
+    print(f"handle_pull_request: findings={findings}")
 
     threshold = SEVERITY_ORDER.get(config["severity_threshold"], 1)
     comments = []
     for finding in findings:
         if SEVERITY_ORDER.get(finding.get("severity"), 0) < threshold:
+            print(f"handle_pull_request: dropping finding below threshold: {finding}")
             continue
         file_path, line = finding.get("file"), finding.get("line")
         if line not in valid_lines.get(file_path, set()):
+            print(f"handle_pull_request: dropping finding with invalid position: {finding}")
             continue  # GitHub would reject a position outside the diff's visible hunks
         comments.append({"path": file_path, "line": line, "side": "RIGHT", "body": finding["comment"]})
 
+    print(f"handle_pull_request: {len(comments)} comments to post")
     if not comments:
         return
 
     review = post_review(token, owner, repo, pr_number, comments)
+    # The Create Review response has no "comments" field - the inline comments it just
+    # created have to be fetched separately, scoped to this review's id.
+    posted_comments = get_review_comments(token, owner, repo, pr_number, review["id"])
+    print(f"handle_pull_request: posted_review_id={review['id']} posted_comments_count={len(posted_comments)}")
     posted_at = datetime.now(timezone.utc)
-    for review_comment in review.get("comments", []):
+    for review_comment in posted_comments:
         posted_comments_table.put_item(Item={
             "comment_id": str(review_comment["id"]),
             "repo_id": repo_id,
@@ -92,13 +112,19 @@ def handle_pull_request(payload: dict) -> None:
 
 
 def handle_issue_comment(payload: dict) -> None:
-    if payload.get("action") != "created" or "pull_request" not in payload.get("issue", {}):
+    action = payload.get("action")
+    is_pr_comment = "pull_request" in payload.get("issue", {})
+    if action != "created" or not is_pr_comment:
+        print(f"handle_issue_comment: skipping, action={action!r} is_pr_comment={is_pr_comment}")
         return  # only react to new comments on a PR, not plain issues
 
-    match = BOT_COMMAND.search(payload.get("comment", {}).get("body", ""))
+    body = payload.get("comment", {}).get("body", "")
+    match = BOT_COMMAND.search(body)
     if not match:
+        print(f"handle_issue_comment: no bot command match in body={body!r}")
         return
     command = match.group(1).lower()
+    print(f"handle_issue_comment: matched command={command!r}")
 
     repo_id = str(payload["repository"]["id"])
     owner = payload["repository"]["owner"]["login"]
@@ -140,6 +166,7 @@ def lambda_handler(event, context):
         message = json.loads(record["body"])
         github_event = message["github_event"]
         payload = message["payload"]
+        print(f"worker: github_event={github_event!r} action={payload.get('action')!r}")
 
         if github_event == "pull_request":
             handle_pull_request(payload)

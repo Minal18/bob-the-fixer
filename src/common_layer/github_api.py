@@ -54,6 +54,22 @@ def post_review(token: str, owner: str, repo: str, pr_number: int, comments: lis
     return response.json()
 
 
+def get_review_comments(token: str, owner: str, repo: str, pr_number: int, review_id: int) -> list[dict]:
+    """The Create Review response has no 'comments' field, and the review-scoped
+    .../reviews/{id}/comments endpoint returns the "Legacy Review Comment" shape,
+    where `line`/`original_line` aren't reliably populated. Fetch all of the PR's
+    review comments (current schema, which does populate `line`) and filter down
+    to just the ones created by this review.
+    """
+    response = requests.get(
+        f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+        headers=_headers(token),
+        timeout=10,
+    )
+    response.raise_for_status()
+    return [c for c in response.json() if c.get("pull_request_review_id") == review_id]
+
+
 def post_issue_comment(token: str, owner: str, repo: str, issue_number: int, body: str) -> None:
     response = requests.post(
         f"{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments",

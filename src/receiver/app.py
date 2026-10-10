@@ -29,8 +29,10 @@ def lambda_handler(event, context):
         return {"statusCode": 401, "body": "invalid signature"}
 
     github_event = headers.get("x-github-event", "")
+    print(f"receiver: github_event={github_event!r}")
     if github_event not in ("pull_request", "issue_comment"):
         # Ack anything else so GitHub doesn't retry; we just don't act on it.
+        print(f"receiver: ignoring unsupported event {github_event!r}")
         return {"statusCode": 202, "body": "ignored"}
 
     sqs.send_message(
