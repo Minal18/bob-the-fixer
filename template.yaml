@@ -125,37 +125,18 @@ Resources:
       DatabaseInput:
         Name: !Sub bob_the_fixer_${Stage}_analytics
 
-  FeedbackMetricsIcebergTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref AnalyticsGlueDatabase
-      TableInput:
-        Name: feedback_metrics
-        TableType: EXTERNAL_TABLE
-        StorageDescriptor:
-          Location: !Sub s3://${AnalyticsBucket}/feedback-metrics/
-          Columns:
-            - Name: comment_id
-              Type: string
-            - Name: repo_id
-              Type: string
-            - Name: pr_number
-              Type: int
-            - Name: file_path
-              Type: string
-            - Name: line
-              Type: int
-            - Name: thumbs_up
-              Type: int
-            - Name: thumbs_down
-              Type: int
-            - Name: checked_at
-              Type: timestamp
-        OpenTableFormatInput:
-          IcebergInput:
-            MetadataOperation: CREATE
-            Version: '2'
+  # The Feedback Metrics Iceberg table itself is NOT declared here: CloudFormation's
+  # pre-deployment property validation for AWS::Glue::Table doesn't yet recognize
+  # OpenTableFormatInput (a real, working CFN property - confirmed against AWS's own
+  # docs - just one its static validation schema hasn't caught up to). Same pattern as
+  # the Secrets above: the stack creates the database/bucket/workgroup, and the table
+  # itself is created once, out of band, via:
+  #   CREATE TABLE <AnalyticsGlueDatabase>.feedback_metrics (
+  #     comment_id string, repo_id string, pr_number int, file_path string, line int,
+  #     thumbs_up int, thumbs_down int, checked_at timestamp)
+  #   LOCATION 's3://<AnalyticsBucket>/feedback-metrics/'
+  #   TBLPROPERTIES ('table_type'='ICEBERG')
+  # run through the AnalyticsWorkGroup.
 
   AnalyticsWorkGroup:
     Type: AWS::Athena::WorkGroup

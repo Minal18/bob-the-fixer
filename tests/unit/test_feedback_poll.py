@@ -154,6 +154,47 @@ def test_lambda_handler_reuses_installation_token_across_comments(feedback_poll_
     assert len(token_calls) == 1  # cached across both comments, not re-minted
 
 
+@responses.activate
+def test_lambda_handler_skips_legacy_rows_missing_new_fields(feedback_poll_app, monkeypatch):
+    import datetime
+
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    # A row posted before owner/repo/installation_id existed - must be skipped, not crash the batch.
+    legacy_item = {
+        "comment_id": "111",
+        "repo_id": "123456",
+        "pr_number": 7,
+        "file_path": "foo.py",
+        "line": 2,
+        "posted_date": today,
+    }
+    feedback_poll_app.posted_comments_table.put_item(Item=legacy_item)
+    feedback_poll_app.posted_comments_table.put_item(Item=_posted_comment("555", today))
+
+    monkeypatch.setattr(feedback_poll_app, "get_secret", lambda arn: FAKE_PRIVATE_KEY_PEM)
+    fake_athena = _FakeAthenaClient()
+    monkeypatch.setattr(feedback_poll_app, "athena", fake_athena)
+
+    responses.add(
+        responses.POST,
+        f"{GITHUB_API}/app/installations/999/access_tokens",
+        json={"token": "fake-installation-token"},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{GITHUB_API}/repos/acme/widgets/pulls/comments/555",
+        json={"id": 555, "reactions": {"+1": 1, "-1": 0}},
+        status=200,
+    )
+
+    result = feedback_poll_app.lambda_handler({"window_days": 3}, None)
+
+    assert result == {"checked": 2, "merged": 1}  # legacy row counted as checked, but not merged
+    assert len(fake_athena.merge_calls) == 1
+    assert "'111'" not in fake_athena.merge_calls[0]["QueryString"]
+
+
 def test_lambda_handler_no_candidates_does_not_call_athena(feedback_poll_app, monkeypatch):
     fake_athena = _FakeAthenaClient()
     monkeypatch.setattr(feedback_poll_app, "athena", fake_athena)

@@ -56,6 +56,11 @@ def lambda_handler(event, context):
     checked_at = datetime.now(timezone.utc)
     rows = []
     for comment in comments_to_check:
+        if not {"owner", "repo", "installation_id"} <= comment.keys():
+            # Row predates the owner/repo/installation_id fields (posted before this
+            # poll logic existed) - skip rather than crash the whole batch on it.
+            print(f"lambda_handler: skipping legacy row missing owner/repo/installation_id: {comment.get('comment_id')}")
+            continue
         token = _installation_token(int(comment["installation_id"]), token_cache)
         reactions = get_comment_reactions(token, comment["owner"], comment["repo"], int(comment["comment_id"]))
         rows.append({
