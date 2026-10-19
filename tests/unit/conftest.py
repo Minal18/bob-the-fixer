@@ -23,3 +23,6 @@ os.environ.setdefault(
     "ANTHROPIC_API_KEY_SECRET_ARN",
     "arn:aws:secretsmanager:us-east-1:000000000000:secret:fake-anthropic-key",
 )
+os.environ.setdefault("ATHENA_WORKGROUP", "test-bob-analytics")
+os.environ.setdefault("GLUE_DATABASE", "test_bob_analytics")
+os.environ.setdefault("GLUE_TABLE", "feedback_metrics")

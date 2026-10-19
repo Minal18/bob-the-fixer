@@ -133,6 +133,9 @@ def test_handle_pull_request_posts_review_and_records_comment(worker_app, monkey
     item = worker_app.posted_comments_table.get_item(Key={"comment_id": "555"}).get("Item")
     assert item is not None
     assert item["repo_id"] == repo_id
+    assert item["owner"] == "acme"
+    assert item["repo"] == "widgets"
+    assert item["installation_id"] == 999
     assert item["pr_number"] == 7
     assert item["file_path"] == "foo.py"
     assert item["line"] == 2

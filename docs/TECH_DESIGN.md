@@ -70,7 +70,10 @@ Bob posts one review per PR containing multiple inline comments — each line-le
 | Field | Type | Notes |
 |---|---|---|
 | `comment_id` | string (PK) | GitHub comment ID, returned on post |
-| `repo_id` | string | Needed to call the Reactions API (`owner/repo` + `comment_id`) |
+| `repo_id` | string | Numeric GitHub repo ID — denormalized into Feedback Metrics for Athena, not used to call the GitHub API directly |
+| `owner` | string | GitHub org/user login — the Reactions API is addressed by `owner/repo`, not numeric repo ID |
+| `repo` | string | Repo name — see above |
+| `installation_id` | int | Captured from the webhook payload at post time, so the Feedback Poll Lambda can mint its own installation token later without a separate lookup |
 | `pr_number` | int | Needed to re-fetch the PR's current diff for the acted-upon-rate metric |
 | `file_path` | string | File the comment is anchored to — needed for acted-upon-rate |
 | `line` | int | Line number the comment is anchored to — needed for acted-upon-rate |

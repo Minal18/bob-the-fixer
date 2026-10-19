@@ -2,8 +2,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Bob the Fixer — AI-powered GitHub PR reviewer.
-  Webhook Receiver -> SQS -> Worker Lambda, DynamoDB enablement/comments/feedback
-  stores, and an EventBridge-scheduled feedback poll.
+  Webhook Receiver -> SQS -> Worker Lambda, DynamoDB enablement/comments stores,
+  and an EventBridge-scheduled feedback poll that merges straight into a
+  Feedback Metrics Iceberg table (S3 + Glue Catalog) via Athena.
 
 Parameters:
   Stage:
@@ -102,19 +103,69 @@ Resources:
           Projection:
             ProjectionType: ALL
 
-  FeedbackMetricsTable:
-    Type: AWS::DynamoDB::Table
+  # ---------- Analytics (Feedback Metrics Iceberg table) ----------
+  # No DynamoDB table here: Feedback Metrics has no operational/low-latency
+  # consumer, only Athena, so the Feedback Poll Lambda merges straight into
+  # this Iceberg table instead of staging writes in DynamoDB first.
+
+  AnalyticsBucket:
+    Type: AWS::S3::Bucket
     Properties:
-      TableName: !Sub bob-the-fixer-${Stage}-feedback-metrics
-      BillingMode: PAY_PER_REQUEST
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      AttributeDefinitions:
-        - AttributeName: comment_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: comment_id
-          KeyType: HASH
+      BucketName: !Sub bob-the-fixer-${Stage}-analytics-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AnalyticsGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub bob_the_fixer_${Stage}_analytics
+
+  FeedbackMetricsIcebergTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AnalyticsGlueDatabase
+      TableInput:
+        Name: feedback_metrics
+        TableType: EXTERNAL_TABLE
+        StorageDescriptor:
+          Location: !Sub s3://${AnalyticsBucket}/feedback-metrics/
+          Columns:
+            - Name: comment_id
+              Type: string
+            - Name: repo_id
+              Type: string
+            - Name: pr_number
+              Type: int
+            - Name: file_path
+              Type: string
+            - Name: line
+              Type: int
+            - Name: thumbs_up
+              Type: int
+            - Name: thumbs_down
+              Type: int
+            - Name: checked_at
+              Type: timestamp
+        OpenTableFormatInput:
+          IcebergInput:
+            MetadataOperation: CREATE
+            Version: '2'
+
+  AnalyticsWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub bob-the-fixer-${Stage}-analytics
+      WorkGroupConfiguration:
+        EngineVersion:
+          SelectedEngineVersion: Athena engine version 3
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${AnalyticsBucket}/athena-results/
 
   # ---------- Ingest path ----------
 
@@ -199,13 +250,16 @@ Resources:
       FunctionName: !Sub bob-the-fixer-${Stage}-feedback-poll
       CodeUri: src/feedback_poll/
       Handler: app.lambda_handler
-      Timeout: 60
+      Timeout: 180
       Layers: [!Ref CommonLayer]
       Environment:
         Variables:
           POSTED_COMMENTS_TABLE: !Ref PostedCommentsTable
-          FEEDBACK_METRICS_TABLE: !Ref FeedbackMetricsTable
+          GITHUB_APP_ID: !Ref GitHubAppId
           GITHUB_APP_PRIVATE_KEY_SECRET_ARN: !Ref GitHubAppPrivateKeySecret
+          ATHENA_WORKGROUP: !Ref AnalyticsWorkGroup
+          GLUE_DATABASE: !Ref AnalyticsGlueDatabase
+          GLUE_TABLE: feedback_metrics
           POLL_WINDOW_DAYS: '3'
       Events:
         ScheduledPoll:
@@ -213,15 +267,47 @@ Resources:
           Properties:
             Schedule: rate(6 hours)
             Enabled: true
+            Input: '{"window_days": 3}'
+        ScheduledReconcile:
+          Type: Schedule
+          Properties:
+            Schedule: rate(7 days)
+            Enabled: true
+            Input: '{"window_days": 30}'
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref PostedCommentsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref FeedbackMetricsTable
         - Statement:
             - Effect: Allow
               Action: secretsmanager:GetSecretValue
               Resource: !Ref GitHubAppPrivateKeySecret
+            - Effect: Allow
+              Action:
+                - athena:StartQueryExecution
+                - athena:GetQueryExecution
+                - athena:GetWorkGroup
+              Resource: !Sub arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AnalyticsWorkGroup}
+            - Effect: Allow
+              Action:
+                - glue:GetDatabase
+                - glue:GetDatabases
+                - glue:GetTable
+                - glue:GetTables
+                - glue:UpdateTable
+              Resource:
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${AnalyticsGlueDatabase}
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${AnalyticsGlueDatabase}/feedback_metrics
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource:
+                - !GetAtt AnalyticsBucket.Arn
+                - !Sub ${AnalyticsBucket.Arn}/*
 
 Outputs:
   ReceiverFunctionUrl:
@@ -233,8 +319,10 @@ Outputs:
     Value: !Ref EnablementTable
   PostedCommentsTableName:
     Value: !Ref PostedCommentsTable
-  FeedbackMetricsTableName:
-    Value: !Ref FeedbackMetricsTable
+  AnalyticsBucketName:
+    Value: !Ref AnalyticsBucket
+  AnalyticsGlueDatabaseName:
+    Value: !Ref AnalyticsGlueDatabase
   GitHubAppPrivateKeySecretArn:
     Value: !Ref GitHubAppPrivateKeySecret
   GitHubWebhookSecretArn:

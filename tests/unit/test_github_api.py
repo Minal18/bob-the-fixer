@@ -6,6 +6,7 @@ import responses
 
 from github_api import (
     get_collaborator_permission,
+    get_comment_reactions,
     get_pr_diff,
     get_repo_file,
     get_review_comments,
@@ -108,6 +109,30 @@ def test_get_review_comments_filters_to_just_this_review():
     )
     result = get_review_comments("tok", "acme", "widgets", 7, 42)
     assert {c["id"] for c in result} == {555, 556}
+
+
+@responses.activate
+def test_get_comment_reactions_reads_aggregated_summary():
+    responses.add(
+        responses.GET,
+        f"{GITHUB_API}/repos/acme/widgets/pulls/comments/555",
+        json={"id": 555, "reactions": {"+1": 3, "-1": 1, "laugh": 2}},
+        status=200,
+    )
+    result = get_comment_reactions("tok", "acme", "widgets", 555)
+    assert result == {"thumbs_up": 3, "thumbs_down": 1}
+
+
+@responses.activate
+def test_get_comment_reactions_defaults_to_zero_when_no_reactions_yet():
+    responses.add(
+        responses.GET,
+        f"{GITHUB_API}/repos/acme/widgets/pulls/comments/555",
+        json={"id": 555, "reactions": {}},
+        status=200,
+    )
+    result = get_comment_reactions("tok", "acme", "widgets", 555)
+    assert result == {"thumbs_up": 0, "thumbs_down": 0}
 
 
 @responses.activate

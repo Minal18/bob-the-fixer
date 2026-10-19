@@ -70,6 +70,20 @@ def get_review_comments(token: str, owner: str, repo: str, pr_number: int, revie
     return [c for c in response.json() if c.get("pull_request_review_id") == review_id]
 
 
+def get_comment_reactions(token: str, owner: str, repo: str, comment_id: int) -> dict:
+    """The comment resource itself carries a pre-aggregated reactions summary -
+    cheaper than paginating the separate per-reaction list endpoint.
+    """
+    response = requests.get(
+        f"{GITHUB_API}/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+        headers=_headers(token),
+        timeout=10,
+    )
+    response.raise_for_status()
+    reactions = response.json().get("reactions", {})
+    return {"thumbs_up": reactions.get("+1", 0), "thumbs_down": reactions.get("-1", 0)}
+
+
 def post_issue_comment(token: str, owner: str, repo: str, issue_number: int, body: str) -> None:
     response = requests.post(
         f"{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments",
