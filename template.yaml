@@ -117,6 +117,12 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAthenaQueryResults
+            Status: Enabled
+            Prefix: athena-results/
+            ExpirationInDays: 30
 
   AnalyticsGlueDatabase:
     Type: AWS::Glue::Database
