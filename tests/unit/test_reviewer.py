@@ -71,6 +71,26 @@ def test_review_diff_prompt_includes_focus_and_custom_instructions(monkeypatch):
     assert captured_calls[0]["tool_choice"] == {"type": "tool", "name": "report_findings"}
 
 
+def test_review_diff_prompt_annotates_diff_with_line_numbers(monkeypatch):
+    response = _FakeResponse([_FakeBlock("tool_use", name="report_findings", input={"findings": []})])
+    captured_calls = _patch_anthropic(monkeypatch, response)
+
+    diff = (
+        "diff --git a/foo.py b/foo.py\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        "+added_line\n"
+        " context_line\n"
+    )
+    reviewer.review_diff("fake-key", diff, {})
+
+    prompt = captured_calls[0]["messages"][0]["content"]
+    assert "1: +added_line" in prompt
+    assert "2:  context_line" in prompt
+    assert "do not count lines yourself" in prompt
+
+
 def test_review_diff_prompt_includes_severity_rubric(monkeypatch):
     response = _FakeResponse([_FakeBlock("tool_use", name="report_findings", input={"findings": []})])
     captured_calls = _patch_anthropic(monkeypatch, response)

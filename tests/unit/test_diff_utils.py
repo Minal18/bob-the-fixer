@@ -1,4 +1,4 @@
-from diff_utils import commentable_lines, filter_diff_by_ignore_paths
+from diff_utils import annotate_diff_with_line_numbers, commentable_lines, filter_diff_by_ignore_paths
 
 
 def test_commentable_lines_tracks_added_and_context_lines_not_removed():
@@ -65,6 +65,43 @@ def test_commentable_lines_no_newline_at_end_of_file_marker_ignored():
     )
     lines = commentable_lines(diff)
     assert lines["foo.py"] == {1}
+
+
+def test_annotate_diff_with_line_numbers_labels_added_and_context_not_removed():
+    diff = (
+        "diff --git a/foo.py b/foo.py\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " keep1\n"
+        "-removed\n"
+        "+added\n"
+        " keep2\n"
+    )
+    annotated = annotate_diff_with_line_numbers(diff)
+    lines = annotated.split("\n")
+    assert "@@ -1,3 +1,3 @@" in lines
+    assert "1:  keep1" in lines
+    assert "-removed" in lines  # removed line: unprefixed, no new-file line number
+    assert "2: +added" in lines
+    assert "3:  keep2" in lines
+
+
+def test_annotate_diff_with_line_numbers_resets_per_file():
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +10,1 @@\n"
+        "+a_line\n"
+        "diff --git a/b.py b/b.py\n"
+        "+++ b/b.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "+b_line\n"
+    )
+    annotated = annotate_diff_with_line_numbers(diff)
+    lines = annotated.split("\n")
+    assert "10: +a_line" in lines
+    assert "1: +b_line" in lines
 
 
 def test_filter_diff_by_ignore_paths_empty_list_returns_diff_unchanged():

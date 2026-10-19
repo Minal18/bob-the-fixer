@@ -1,6 +1,8 @@
 """Calls Claude to produce PR review findings, constrained to the supplied diff."""
 import anthropic
 
+from diff_utils import annotate_diff_with_line_numbers
+
 MODEL = "claude-sonnet-5"
 
 FINDINGS_TOOL = {
@@ -43,13 +45,20 @@ def review_diff(api_key: str, diff_text: str, config: dict) -> list[dict]:
 
     focus = ", ".join(config.get("review_focus") or ["bugs", "security"])
     custom_instructions = config.get("custom_instructions") or ""
+    annotated_diff = annotate_diff_with_line_numbers(diff_text)
 
     prompt = f"""Review this pull request diff. Focus on: {focus}.
 {custom_instructions}
 
 Only flag lines that literally appear in the diff below (added '+' lines or unchanged
 context lines) — never a line from outside this diff. Use the exact file path as shown
-after "+++ b/" and the line number as it appears in the new version of the file.
+after "+++ b/".
+
+Each added or context line below is prefixed with "N: " where N is its exact line
+number in the new version of the file (e.g. "42: +    foo()"). Read that number off
+the line you want to comment on and report it as-is — do not count lines yourself.
+Lines without an "N: " prefix (file/hunk headers, removed '-' lines) have no line
+number and can't be commented on.
 
 Severity rubric — classify each finding by its actual impact, not by how it feels:
 - error: will cause incorrect behavior, a crash, data loss, or is an exploitable security
@@ -60,7 +69,7 @@ Severity rubric — classify each finding by its actual impact, not by how it fe
 - info: minor, stylistic, or a nice-to-have improvement. Not a functional risk.
 
 <diff>
-{diff_text}
+{annotated_diff}
 </diff>"""
 
     response = client.messages.create(
