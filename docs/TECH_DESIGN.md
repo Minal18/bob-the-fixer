@@ -17,15 +17,13 @@ flowchart TD
     D --> G["LLM API (Claude)"]
     D --> H[("Posted Comments Table")]
 
-    I["EventBridge Scheduler<br/>(fixed interval)"] --> J["Feedback Poll Lambda"]
+    I1["EventBridge Scheduler<br/>(T-2/3 day delta)"] --> J["Feedback Poll Lambda"]
+    I2["EventBridge Scheduler<br/>(weekly, 30-day reconcile)"] --> J
     J -- "read: which comments to check" --> H
     J --> K["GitHub Reactions API"]
-    J --> L[("Feedback Metrics Table")]
+    J -- "upsert (MERGE)" --> L[("Feedback Metrics<br/>Iceberg Table, S3 + Glue Catalog")]
 
-    H -. "export" .-> M[("S3<br/>analytics export")]
-    L -. "export" .-> M
-    M --> N["Glue Catalog Table"]
-    N --> O["Athena<br/>(ad-hoc SQL)"]
+    L --> O["Athena<br/>(ad-hoc SQL)"]
 ```
 
 ## Event Triggers
@@ -48,12 +46,10 @@ Two independent GitHub webhook event types feed the same pipeline — one doesn'
 | **SQS Queue** | Buffers events between receipt and processing |
 | **Worker Lambda** | Exchanges JWT → installation token; branches on event type: PR review, or `enable`/`disable`/`status` command. For reviews, maps LLM findings to diff positions (file + hunk offset) before posting inline comments |
 | **Enablement Store** | Per-repo on/off flag, since repos are installed broadly but reviewed only when explicitly enabled |
-| **Posted Comments Table** | Records every comment Bob posts, so feedback can be polled later |
-| **Feedback Poll Lambda** | Invoked on a fixed interval by EventBridge Scheduler; reads recent rows from Posted Comments, checks reaction counts on each via the GitHub Reactions API |
-| **Feedback Metrics Table** | Stores 👍/👎 counts per comment, the core quality signal |
-| **S3 (analytics export)** | Destination for DynamoDB's native export-to-S3 — periodic snapshot of Posted Comments + Feedback Metrics, not a live sync |
-| **Glue Catalog Table** | Schema definition over the S3 export so Athena knows how to read it — no crawler pipeline needed while the schema is stable and hand-defined |
-| **Athena** | Ad-hoc SQL over the export — feedback trends, per-repo rollups, joins between the two tables; billed per query scanned, nothing running idle |
+| **Posted Comments Table** | Records every comment Bob posts, so feedback can be polled later. Purely operational — never exported, no analytics consumer reads it directly |
+| **Feedback Poll Lambda** | A batch upsert job, invoked by two EventBridge Scheduler rules with different lookback windows (see below); for each candidate row from Posted Comments, checks reaction counts via the GitHub Reactions API, then merges the result straight into the Feedback Metrics Iceberg table |
+| **Feedback Metrics (Iceberg Table)** | S3-backed, Glue Catalog-registered Iceberg table — the single analytics source of truth. Stores 👍/👎 counts per comment, denormalized with repo/PR/file context so Athena never has to join. Written directly by the Feedback Poll Lambda via `MERGE`/upsert — no intermediate DynamoDB table, no export step |
+| **Athena** | Ad-hoc SQL directly over the Iceberg table — feedback trends, per-repo rollups; billed per query scanned, nothing running idle. Freshness is bounded by the poll schedule, not by a separate export cadence on top of it |
 
 ## Data Model
 
@@ -81,20 +77,24 @@ Bob posts one review per PR containing multiple inline comments — each line-le
 | `posted_at` | timestamp | Drives the poll window; also the GSI partition key (see below) |
 | `last_checked_at` | timestamp, nullable | Set by the feedback poll job |
 
-**GSI**: partition key = `posted_at` truncated to date (e.g. `"2026-09-13"`), no sort key. A base-table Scan would get slower and costlier every month as history piles up; querying this GSI for a small number of day-bucket values (see poll window below) is fast and cheap instead. No sort key needed — the poll job takes everything in a day's bucket rather than a sub-day range, and any real trend/rollup analysis happens in Athena, not against this table directly.
+**GSI**: partition key = `posted_at` truncated to date (e.g. `"2026-09-13"`), no sort key. A base-table Scan would get slower and costlier every month as history piles up; querying this GSI for a small number of day-bucket values (see poll windows below) is fast and cheap instead — both the T-2/3 day delta poll and the 30-day reconciliation poll query this same GSI, just over a different number of day-buckets.
 
-### Feedback Metrics Table
+### Feedback Metrics (Iceberg Table — S3 + Glue Catalog)
+
+Not a DynamoDB table. Written directly by the Feedback Poll Lambda via an upsert/`MERGE` keyed on `comment_id`, and read directly by Athena — no intermediate store, no export step. `repo_id`/`pr_number`/`file_path`/`line` are copied over from Posted Comments at poll time (deliberately denormalized, not joined at query time), so this one table is a complete analytics record on its own.
 
 | Field | Type | Notes |
 |---|---|---|
-| `comment_id` | string (PK) | Joins to Posted Comments |
+| `comment_id` | string | Merge key |
+| `repo_id` | string | Denormalized from Posted Comments — avoids a join in Athena |
+| `pr_number` | int | Denormalized from Posted Comments |
+| `file_path` | string | Denormalized from Posted Comments — needed for acted-upon-rate |
+| `line` | int | Denormalized from Posted Comments |
 | `thumbs_up` | int | Snapshot count, not a delta |
 | `thumbs_down` | int | Snapshot count, not a delta |
 | `checked_at` | timestamp | Last time this row was refreshed |
 
-`repo_id`/`pr_number` aren't duplicated here — they're only needed to make the Reactions API call, which happens from Posted Comments; any per-repo or per-PR rollup joins back on `comment_id` rather than storing them twice.
-
-Reactions API returns a current total each call — polling overwrites `thumbs_up`/`thumbs_down`, no incremental math needed.
+Reactions API returns a current total each call — the merge overwrites `thumbs_up`/`thumbs_down`/`checked_at` for matching `comment_id`s, no incremental math needed. A comment not yet polled even once (posted after the Lambda's last run) simply has no row yet — an acceptable, short-lived gap given the poll cadence.
 
 ## Config File (per repo)
 
@@ -125,8 +125,10 @@ Issued as PR/issue comments; require `write` access on the target repo (checked 
 
 - The `enable`/`disable` write is a simple, fast operation (unlike the LLM review call) — the Receiver could handle it synchronously and skip SQS entirely, avoiding queue latency for something users expect to feel instant. Only `pull_request` events strictly need the queue, since only that path has a slow LLM call to buffer against.
 - Inline comments require mapping LLM findings (file + line) to GitHub's diff "position" (offset within the unified diff hunk, not the absolute file line) — GitHub's Review API rejects positions outside the diff's visible hunks. A finding on such a line is dropped rather than surfaced elsewhere; prompt design should constrain the LLM to only flag lines actually present in the diff, validated during testing against real PR shapes.
-- GitHub has no webhook event for reactions being added/removed on a comment (only `created`/`edited`/`deleted` on the comment itself) — this is a known gap, tracked in an open GitHub feature request. Polling the Reactions API is the only option today; both the Posted Comments table (what to check) and Feedback Metrics table (poll results) stay in the design because of this — only the trigger (EventBridge Scheduler instead of Airflow) changed.
-- Feedback poll window: start at T-2/T-3 (recheck comments from the last 2-3 days), not a full week — most reactions land while a PR is still actively being reviewed, so rechecking further back mostly re-hits the Reactions API for comments that already got their reactions. Widen later only if real data shows meaningful engagement arriving later than that.
-- Aggregate views (acted-upon rate, per-repo adoption) are computed in Athena over the S3 export, not stored separately or computed against the live DynamoDB tables.
-- The S3 export is a periodic snapshot (DynamoDB's built-in export-to-S3), not a continuous sync — Feedback Metrics rows are overwritten in place (snapshot counts, not deltas), so each export is a fresh full copy rather than an incremental append. Fine at this scale; revisit (e.g. Iceberg upserts) only if repeated full exports become a real cost or freshness problem.
+- GitHub has no webhook event for reactions being added/removed on a comment (only `created`/`edited`/`deleted` on the comment itself) — this is a known gap, tracked in an open GitHub feature request. Polling the Reactions API is the only option today; the Posted Comments table (what to check) stays in the design because of this.
+- Feedback Poll Lambda runs on two independent EventBridge Scheduler rules, same code, different lookback window passed in the event payload:
+  - **Delta poll, T-2/3 days**, on a short fixed interval — catches the large majority of reactions, which land while a PR is still actively being reviewed.
+  - **Reconciliation poll, 30 days, weekly** — catches reactions that arrive later than the delta window covers (edge case, not the common path). Bounded at 30 days rather than full history, so the job's cost doesn't grow with total lifetime comment volume; widen only if real data shows meaningful engagement arriving later than that.
+- **Feedback Metrics is an Iceberg table (S3 + Glue Catalog), not DynamoDB** — this was a deliberate choice, not a fallback: the table has no operational/low-latency consumer, only Athena, so there was no reason to stage writes in DynamoDB first and export afterward. Writing straight into Iceberg via `MERGE` removes that whole intermediate hop, replaces the old full-table-snapshot export with a true incremental upsert, and (via the denormalized `repo_id`/`pr_number`/`file_path` columns) removes the need for Posted Comments to be exported or joined at query time at all. Posted Comments remains DynamoDB because it *does* have a real operational access pattern (the Worker's write path, the poll job's GSI query).
+- Aggregate views (acted-upon rate, per-repo adoption) are computed in Athena directly over the Iceberg table.
 - Config file validation should fail safe (skip review, log) rather than fail loud.
